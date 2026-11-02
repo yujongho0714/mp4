@@ -1,0 +1,527 @@
+<!DOCTYPE html>
+<html lang="ko"><head>
+<meta charset="utf-8">
+<meta name="referrer" content="strict-origin-when-cross-origin">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>연속 재생 플레이어</title>
+<style>
+  :root { --bg:#111; --card:#1e1e1e; --fg:#f2f2f2; --sub:#9a9a9a; --acc:#ff4d4d; }
+  * { box-sizing:border-box; }
+  body { margin:0; background:var(--bg); color:var(--fg); font-family:-apple-system,"Noto Sans KR",sans-serif; }
+  .wrap { max-width:900px; margin:0 auto; padding:12px; }
+  h1 { font-size:18px; margin:6px 0 10px; }
+  #stage:fullscreen{border-radius:0} #stage { position:relative; width:100%; aspect-ratio:16/9; background:#000; border-radius:10px; overflow:hidden; }
+  #player { position:absolute; inset:0; width:100%; height:100%; }
+  #now { margin:10px 2px 4px; font-size:15px; font-weight:600; }
+  #msg { min-height:20px; margin:0 2px 8px; font-size:13px; color:var(--sub); }
+  .row { display:flex; gap:8px; flex-wrap:wrap; margin:8px 0; }
+  button { background:#2c2c2c; color:var(--fg); border:0; border-radius:8px; padding:11px 14px; font-size:14px; }
+  button.main { background:var(--acc); }
+  input[type=number] { width:80px; background:#2c2c2c; color:var(--fg); border:0; border-radius:8px; padding:11px; font-size:14px; }
+  textarea { width:100%; height:150px; background:var(--card); color:var(--fg); border:1px solid #333; border-radius:10px; padding:10px; font-size:13px; }
+  #list { display:grid; grid-template-columns:repeat(auto-fill,minmax(58px,1fr)); gap:6px; margin-top:8px; }
+  #list button { padding:9px 0; font-size:13px; }
+  #list button.cur { background:var(--acc); }
+  #list button.bad { color:#777; text-decoration:line-through; }
+  #recst { min-height:20px; margin:0 2px 8px; font-size:13px; color:#ff8a8a; }
+  button.rec { background:#7a1f1f; }
+  button.rec.on { background:var(--acc); }
+  details { margin-top:10px; }
+  summary { padding:8px 2px; color:var(--sub); }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>▶ 연속 재생 플레이어</h1>
+
+  <div id="stage"><div id="player"></div></div>
+  <div id="now">재생 버튼을 눌러 시작하세요</div>
+  <div id="msg"></div>
+
+  <div class="row">
+    <button id="auto" class="main" style="flex:1 1 100%;font-size:17px;padding:14px">▶ 자동 연속재생 시작 (화면 꺼짐 방지)</button>
+    <button id="fs">⛶ 영상만 크게</button>
+    <button id="prev">◀ 이전</button>
+    <button id="next" class="main">다음 ▶</button>
+    <input id="jump" type="number" min="1" placeholder="화" inputmode="numeric">
+    <button id="go">이동</button>
+    <button id="ytopen">유튜브에서 열기</button>
+  </div>
+
+  <div class="row" style="align-items:center">
+    <button id="recbtn" class="rec">🔴 연속 녹화 켜기</button>
+    <label style="font-size:13px;color:var(--sub)"><input type="checkbox" id="reccrop" checked> 영상 부분만 녹화</label>
+  </div>
+  <div id="recst"></div>
+
+  <div class="row" style="align-items:center">
+    <button id="upbtn" class="main">📂 강의 목록 파일 올리기</button>
+    <input type="file" id="upfile" accept=".txt,.html,.htm,text/plain,text/html" style="display:none">
+    <span id="upst" style="font-size:13px;color:var(--sub)"></span>
+  </div>
+
+  <details id="box">
+    <summary>영상 목록 (한 줄에 링크 하나, 위에서부터 1화, 2화…)</summary>
+    <textarea id="input" placeholder="https://www.youtube.com/live/xxxxxxxxxxx
+https://youtu.be/yyyyyyyyyyy
+…"></textarea>
+    <label style="display:block;margin:8px 2px;font-size:13px;color:var(--sub)">
+      <input type="checkbox" id="rev"> 최신 글이 위에 있는 순서로 붙여 넣었어요 (강 번호가 없을 때만 순서를 뒤집음)
+    </label>
+    <div class="row"><button id="load" class="main">목록 적용 &amp; 1화부터 재생</button><button id="verify">목록 검증 · 번호 바로잡기</button><button id="mklinks">유튜브 앱용 연속재생 링크</button><button id="export" class="main">박제해서 내보내기</button><button id="clear">목록 지우기</button></div>
+    <div id="links" class="row"></div>
+    <div id="vreport" style="white-space:pre-line;font-size:13px;color:var(--sub);margin:6px 2px"></div>
+  </details>
+
+  <div id="list"></div>
+</div>
+
+<script>
+const AUTO_VERIFY = false;
+const DEFAULT_LIST = "";
+const KEY = 'ytseq_112_v1';
+let ids = [], cur = -1, player = null, apiReady = false, bad = new Set(), skipTimer = null;
+
+const $ = id => document.getElementById(id);
+const msg = t => { $('msg').textContent = t || ''; };
+
+function extractId(line) {
+  line = line.trim();
+  if (!line) return null;
+  let m = line.match(/(?:youtu\.be\/|youtube\.com\/(?:watch\?(?:[^\s]*&)?v=|live\/|shorts\/|embed\/))([\w-]{11})/);
+  if (m) return m[1];
+  if (line.includes('http')) return null;
+  m = line.match(/(?:^|\s)([\w-]{11})(?:\s|$)/);
+  return m ? m[1] : null;
+}
+
+// 밴드 글을 통째로 붙여 넣어도 됨: "74강 링크입니다" + 링크 → 강 번호순(1강→112강)으로 정렬
+let parseNote = '';
+function parseList(text) {
+  const entries = [];
+  const seen = new Set();
+  let lastN = null;
+  text.split('\n').forEach(line => {
+    const id = extractId(line);
+    const nm = line.match(/(\d+)\s*강/);
+    if (id) {
+      if (!seen.has(id)) {
+        seen.add(id);
+        entries.push({ id, n: nm ? parseInt(nm[1], 10) : lastN });
+      }
+      lastN = null;
+    } else if (nm) {
+      lastN = parseInt(nm[1], 10);
+    }
+  });
+  if (entries.length && entries.every(e => e.n !== null)) {
+    entries.sort((a, b) => a.n - b.n);
+    parseNote = ' (강 번호순으로 정렬됨)';
+  } else {
+    if ($('rev').checked) entries.reverse();
+    parseNote = $('rev').checked ? ' (붙여 넣은 순서를 뒤집음)' : '';
+  }
+  return entries.map(e => e.id);
+}
+
+function save() {
+  try { localStorage.setItem(KEY, JSON.stringify({ text: $('input').value, cur, rev: $('rev').checked })); } catch (e) {}
+}
+
+function renderList() {
+  const box = $('list');
+  box.innerHTML = '';
+  ids.forEach((_, i) => {
+    const b = document.createElement('button');
+    b.textContent = (i + 1) + '화';
+    if (i === cur) b.className = 'cur';
+    else if (bad.has(i)) b.className = 'bad';
+    b.onclick = () => play(i);
+    box.appendChild(b);
+  });
+}
+
+function play(i, auto) {
+  clearTimeout(skipTimer);
+  if (!ids.length) return;
+  if (!auto && rec) finishRec('_중간끊김');
+  if (i < 0) i = 0;
+  if (i >= ids.length) { msg('마지막 영상까지 모두 재생했어요.'); return; }
+  cur = i;
+  $('now').textContent = (cur + 1) + '화 / 총 ' + ids.length + '화';
+  msg('');
+  renderList();
+  save();
+  if (!apiReady) return;
+  player.loadVideoById(ids[cur]);
+  armWatch();
+  const active = document.querySelector('#list .cur');
+  if (active) active.scrollIntoView({ block: 'nearest' });
+}
+
+function applyList(startAt) {
+  ids = parseList($('input').value);
+  bad = new Set();
+  if (!ids.length) { msg('인식된 링크가 없어요.'); renderList(); return; }
+  $('box').open = false;
+  play(startAt || 0);
+  msg(ids.length + '개 인식' + parseNote);
+}
+
+// ===== 자동 연속재생 모드 =====
+let autoMode = false, watchT = null, wakeLock = null;
+function armWatch() {
+  clearTimeout(watchT);
+  if (!autoMode) return;
+  // 다음 화가 자동으로 안 켜지면(휴대폰 자동재생 제한) 다시 재생 명령, 그래도 안 되면 넘어가기
+  let tries = 0;
+  const chk = () => {
+    if (!autoMode || !apiReady) return;
+    let st = -1; try { st = player.getPlayerState(); } catch (e) {}
+    if (st === 1 || st === 3 || st === 0) return;
+    if (st === 2 && tries === 0) { /* 사용자가 일시정지한 경우는 건드리지 않음 */ }
+    tries++;
+    if (tries <= 3) { try { player.playVideo(); } catch (e) {} watchT = setTimeout(chk, 2500); }
+    else { msg((cur + 1) + '화가 시작되지 않아 다음 화로 넘어가요.'); bad.add(cur); play(cur + 1, true); }
+  };
+  watchT = setTimeout(chk, 3500);
+}
+async function keepAwake() {
+  try { if ('wakeLock' in navigator && !wakeLock) { wakeLock = await navigator.wakeLock.request('screen'); wakeLock.addEventListener('release', () => { wakeLock = null; }); } } catch (e) {}
+}
+document.addEventListener('visibilitychange', () => { if (autoMode && document.visibilityState === 'visible') keepAwake(); });
+function setAutoBtn() {
+  $('auto').textContent = autoMode ? '⏸ 자동 연속재생 끄기' : '▶ 자동 연속재생 시작 (화면 꺼짐 방지)';
+}
+function toggleAuto() {
+  autoMode = !autoMode; setAutoBtn();
+  if (!autoMode) { clearTimeout(watchT); try { wakeLock && wakeLock.release(); } catch (e) {} wakeLock = null; try { player.pauseVideo(); } catch (e) {} return; }
+  keepAwake();
+  if (!ids.length) applyList(0);
+  if (!apiReady) { msg('플레이어 준비 중… 잠시 후 자동으로 시작돼요.'); return; }
+  let st = -1; try { st = player.getPlayerState(); } catch (e) {}
+  if (st === 2 || st === 5) { try { player.playVideo(); } catch (e) {} armWatch(); }
+  else if (st !== 1) play(cur < 0 ? 0 : cur, true);
+}
+function bigStage() {
+  const el = $('stage');
+  try { (el.requestFullscreen || el.webkitRequestFullscreen).call(el); } catch (e) {}
+  try { screen.orientation && screen.orientation.lock && screen.orientation.lock('landscape').catch(() => {}); } catch (e) {}
+}
+
+// YouTube IFrame API
+function onYouTubeIframeAPIReady() {
+  player = new YT.Player('player', {
+    width: '100%', height: '100%',
+    playerVars: Object.assign({ playsinline: 1, rel: 0 }, /^https?:/.test(location.protocol) ? { origin: location.origin } : {}),
+    events: {
+      onReady: () => {
+        apiReady = true;
+        if (ids.length && cur >= 0) play(cur, autoMode);
+      },
+      onStateChange: e => {
+        if (e.data === YT.PlayerState.ENDED) {
+          finishRec('');
+          if (cur + 1 >= ids.length) releaseRec(true);
+          play(cur + 1, true);
+        }
+        if (e.data === YT.PlayerState.PLAYING) {
+          clearTimeout(watchT);
+          startRec();
+          try {
+            const t = player.getVideoData().title;
+            if (t) $('now').textContent = (cur + 1) + '화 · ' + t;
+          } catch (x) {}
+        }
+      },
+      onError: e => {
+        if ((e.data === 153 || e.data === 152) && !/^https?:/.test(location.protocol)) {
+          msg('오류 153: 이 파일을 폰에서 직접 열어서 유튜브가 재생을 막았어요. 인터넷 주소(https://…)로 올린 페이지에서 열어야 재생돼요.');
+          return;
+        }
+        bad.add(cur);
+        renderList();
+        msg((cur + 1) + '화 재생 불가(오류 ' + e.data + '). 퍼가기 허용/공개 설정을 확인하세요. 3초 뒤 다음 화로 넘어갑니다.');
+        skipTimer = setTimeout(() => play(cur + 1, true), autoMode ? 1500 : 3000);
+      }
+    }
+  });
+}
+const s = document.createElement('script');
+s.src = 'https://www.youtube.com/iframe_api';
+document.head.appendChild(s);
+
+// 각 영상의 실제 제목(예: "74강. ...")을 유튜브에서 읽어 와 번호를 바로잡고 정렬
+async function verify() {
+  const all = [], seen = new Set();
+  $('input').value.split('\n').forEach(l => {
+    const id = extractId(l);
+    if (id && !seen.has(id)) { seen.add(id); all.push(id); }
+  });
+  if (!all.length) { $('vreport').textContent = '목록이 비어 있어요.'; return; }
+
+  const origN = {};
+  (function () {
+    let lastN = null;
+    $('input').value.split('\n').forEach(line => {
+      const id = extractId(line);
+      const nm = line.match(/(\d+)\s*강/);
+      if (id) { if (!(id in origN)) origN[id] = nm ? +nm[1] : lastN; lastN = null; }
+      else if (nm) lastN = +nm[1];
+    });
+  })();
+  const info = {};
+  const queue = [...all];
+  let done = 0;
+  async function worker() {
+    while (queue.length) {
+      const id = queue.shift();
+      try {
+        const r = await fetch('https://www.youtube.com/oembed?format=json&url=' +
+          encodeURIComponent('https://www.youtube.com/watch?v=' + id));
+        if (r.ok) info[id] = { title: (await r.json()).title };
+        else info[id] = { err: r.status };
+      } catch (e) { info[id] = { err: 'net' }; }
+      done++;
+      $('vreport').textContent = '확인 중… ' + done + '/' + all.length;
+    }
+  }
+  await Promise.all(Array.from({ length: 6 }, worker));
+
+  const good = [], bad = [];
+  all.forEach((id, order) => {
+    const t = info[id] && info[id].title;
+    if (!t) { bad.push({ id, why: info[id] ? '오류 ' + info[id].err : '알 수 없음' }); return; }
+    const m = t.match(/^\s*(\d+)\s*강/) || t.match(/(\d+)\s*강/);
+    if (m) good.push({ id, n: +m[1], title: t, order });
+    else bad.push({ id, why: '제목에 강 번호 없음: ' + t });
+  });
+  if (!good.length) {
+    $('vreport').textContent = '제목 조회가 막혀서 번호 검증은 건너뛰었어요. 목록은 그대로 두고 재생합니다.';
+    return;
+  }
+  good.sort((a, b) => a.n - b.n || a.order - b.order);
+
+  const byN = {};
+  good.forEach(e => (byN[e.n] = byN[e.n] || []).push(e));
+  const max = good.length ? Math.max(112, ...good.map(e => e.n)) : 112;
+  const missing = [];
+  for (let i = 1; i <= max; i++) if (!byN[i]) missing.push(i);
+  const multi = Object.keys(byN).filter(n => byN[n].length > 1);
+
+  let rep = '확인 완료: 번호 확인 ' + good.length + '개 / 확인 불가 ' + bad.length + '개';
+  rep += '\n빠진 번호: ' + (missing.length ? missing.join(', ') : '없음');
+  if (multi.length) {
+    rep += '\n한 번호에 영상이 여러 개 (순서대로 이어서 재생됨):';
+    multi.forEach(n => { rep += '\n · ' + n + '강: ' + byN[n].map(e => e.title.slice(0, 22)).join(' / '); });
+  }
+  if (bad.length) {
+    rep += '\n확인 불가 (목록 맨 아래에 "확인필요"로 남김):';
+    bad.forEach(b => { rep += '\n · ' + b.id + ' — ' + b.why; });
+  }
+  $('vreport').textContent = rep;
+
+  $('input').value = good.map(e => e.n + '강 https://youtu.be/' + e.id)
+    .concat(bad.map(b => (origN[b.id] ? origN[b.id] + '강' : '확인필요') + ' https://youtu.be/' + b.id)).join('\n');
+  save();
+}
+
+// 유튜브 자체 임시 재생목록 링크 (한 링크에 최대 50개) — 유튜브 앱/브라우저에서 연속재생
+function makeLinks() {
+  const list = parseList($('input').value);
+  const box = $('links');
+  box.innerHTML = '';
+  if (!list.length) { $('vreport').textContent = '목록이 비어 있어요.'; return; }
+  for (let i = 0; i < list.length; i += 50) {
+    const chunk = list.slice(i, i + 50);
+    const a = document.createElement('a');
+    a.href = 'https://www.youtube.com/watch_videos?video_ids=' + chunk.join(',');
+    a.target = '_blank';
+    a.rel = 'noopener';
+    a.textContent = (i + 1) + '~' + (i + chunk.length) + '번째 열기';
+    a.style.cssText = 'background:#ff4d4d;color:#fff;text-decoration:none;border-radius:8px;padding:11px 14px;font-size:14px';
+    box.appendChild(a);
+  }
+  $('vreport').textContent = '총 ' + list.length + '개 → 링크 ' + box.children.length + '개. 열리면 유튜브에서 재생목록처럼 이어서 재생돼요. (화면 꺼짐/백그라운드 재생은 유튜브 프리미엄 필요)';
+}
+
+// 현재 목록(검증·정렬된 상태)을 파일 안에 박제해서 다른 폰용 HTML로 내보내기
+function exportPage() {
+  const text = $('input').value.trim();
+  if (!text) { $('vreport').textContent = '내보낼 목록이 비어 있어요.'; return; }
+  const clone = document.documentElement.cloneNode(true);
+  clone.querySelectorAll('script[src]').forEach(x => x.remove());
+  const stage = clone.querySelector('#stage');
+  if (stage) stage.innerHTML = '<div id="player"></div>';
+  ['list', 'links', 'vreport', 'msg'].forEach(id => { const e = clone.querySelector('#' + id); if (e) e.innerHTML = ''; });
+  const now = clone.querySelector('#now'); if (now) now.textContent = '재생 버튼을 눌러 시작하세요';
+  const ta = clone.querySelector('#input'); if (ta) ta.textContent = text;
+  const box = clone.querySelector('#box'); if (box) box.removeAttribute('open');
+  const sc = [...clone.querySelectorAll('script')].find(x => x.textContent.includes('DEFAULT_LIST'));
+  if (!sc) { $('vreport').textContent = '내보내기에 실패했어요.'; return; }
+  sc.textContent = sc.textContent
+    .replace(/const AUTO_VERIFY = true;/, 'const AUTO_VERIFY = false;')
+    .replace(/const DEFAULT_LIST = ".*";/, () => 'const DEFAULT_LIST = ' + JSON.stringify(text) + ';');
+  const html = '<!DOCTYPE html>\n' + clone.outerHTML;
+  const d = new Date();
+  const name = '연속재생_박제본_' + d.getFullYear() + String(d.getMonth() + 1).padStart(2, '0') + String(d.getDate()).padStart(2, '0') + '.html';
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(new Blob([html], { type: 'text/html' }));
+  a.download = name;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  $('vreport').textContent = '내보냈어요: ' + name + '\n(목록 ' + parseList(text).length + '개가 파일 안에 박제됨. 다른 폰으로 옮겨 열면 바로 재생 준비 상태예요.)';
+}
+
+
+// ===== 연속 녹화 (탭 화면+소리를 화질 그대로 에피소드별 파일로 저장) =====
+let recStream = null, rec = null, recOn = false;
+const recMsg = t => { $('recst').textContent = t || ''; };
+
+function pickMime() {
+  const c = ['video/mp4;codecs=avc1.640028,mp4a.40.2', 'video/mp4;codecs=avc1,mp4a.40.2', 'video/mp4',
+             'video/webm;codecs=vp9,opus', 'video/webm;codecs=vp8,opus', 'video/webm'];
+  if (!window.MediaRecorder) return '';
+  for (const m of c) { try { if (MediaRecorder.isTypeSupported(m)) return m; } catch (e) {} }
+  return '';
+}
+
+function setRecBtn() {
+  $('recbtn').textContent = recOn ? '⏹ 연속 녹화 끄기' : '🔴 연속 녹화 켜기';
+  $('recbtn').classList.toggle('on', recOn);
+}
+
+async function toggleRec() {
+  if (recOn) { finishRec('_중간끊김'); releaseRec(); recMsg('녹화를 껐어요.'); return; }
+  if (!navigator.mediaDevices || !navigator.mediaDevices.getDisplayMedia || !window.MediaRecorder) {
+    recMsg('휴대폰 브라우저는 페이지 안에서 녹화가 안 돼요. 휴대폰의 "화면 녹화"(빠른 설정판)를 켜고 [▶ 자동 연속재생 시작]을 누르면 끝까지 이어서 한 파일로 녹화돼요. (화별 파일로 나누려면 PC 크롬에서 이 버튼 사용)');
+    return;
+  }
+  try {
+    recStream = await navigator.mediaDevices.getDisplayMedia({
+      video: { frameRate: 30 }, audio: true,
+      preferCurrentTab: true, selfBrowserSurface: 'include', systemAudio: 'exclude'
+    });
+  } catch (e) { recStream = null; recMsg('화면 공유가 취소됐어요.'); return; }
+
+  const vt = recStream.getVideoTracks()[0];
+  let cropped = false;
+  if ($('reccrop').checked && window.CropTarget && vt && vt.cropTo) {
+    try { await vt.cropTo(await CropTarget.fromElement($('stage'))); cropped = true; } catch (e) {}
+  }
+  vt.onended = () => { finishRec('_중간끊김'); releaseRec(); recMsg('화면 공유가 중지되어 녹화를 껐어요.'); };
+  recOn = true;
+  setRecBtn();
+
+  const mime = pickMime();
+  let note = mime.includes('mp4') ? 'mp4로 저장' : 'webm으로 저장(이 브라우저는 mp4 녹화 미지원)';
+  if (!recStream.getAudioTracks().length) note += ' · ⚠ 소리가 공유되지 않았어요(공유창에서 "탭 오디오 공유" 체크 필요)';
+  if ($('reccrop').checked && !cropped) note += ' · 영상 부분만 자르기 미지원이라 탭 전체를 녹화';
+  recMsg('녹화 준비됨 (' + note + '). 영상이 재생되면 자동으로 녹화가 시작돼요.');
+
+  try { if (apiReady && player.getPlayerState() === 1) startRec(); } catch (e) {}
+}
+
+function startRec() {
+  if (!recOn || rec || !recStream) return;
+  const mime = pickMime();
+  let mr;
+  try {
+    mr = new MediaRecorder(recStream, Object.assign({ videoBitsPerSecond: 6000000, audioBitsPerSecond: 128000 }, mime ? { mimeType: mime } : {}));
+  } catch (e) { recMsg('녹화기를 만들 수 없어요: ' + e.message); return; }
+  let title = '';
+  try { title = player.getVideoData().title || ''; } catch (x) {}
+  const r = { mr, chunks: [], n: cur + 1, title, mime: mr.mimeType || mime || 'video/webm', suffix: '' };
+  mr.ondataavailable = ev => { if (ev.data && ev.data.size) r.chunks.push(ev.data); };
+  mr.onstop = () => saveRec(r);
+  mr.start(1000);
+  rec = r;
+  recMsg('🔴 ' + r.n + '화 녹화 중');
+}
+
+function finishRec(suffix) {
+  if (!rec) return;
+  const r = rec; rec = null; r.suffix = suffix || '';
+  try { if (r.mr.state !== 'inactive') r.mr.stop(); } catch (e) { saveRec(r); }
+}
+
+function releaseRec(done) {
+  const st = recStream;
+  recStream = null; recOn = false; setRecBtn();
+  if (st) setTimeout(() => st.getTracks().forEach(t => { t.onended = null; t.stop(); }), 800);
+  if (done) setTimeout(() => recMsg('마지막 화까지 녹화를 마쳤어요.'), 1200);
+}
+
+function saveRec(r) {
+  const blob = new Blob(r.chunks, { type: r.mime.split(';')[0] });
+  if (blob.size < 50000) { recMsg(r.n + '화: 녹화된 내용이 너무 짧아 저장하지 않았어요.'); return; }
+  const ext = r.mime.includes('mp4') ? 'mp4' : 'webm';
+  const safe = r.title.replace(/[\\\/:*?"<>|]/g, '').trim().slice(0, 60);
+  const name = String(r.n).padStart(3, '0') + '화' + (safe ? '_' + safe : '') + r.suffix + '.' + ext;
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = name;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL(a.href), 60000);
+  recMsg((rec ? '🔴 ' + rec.n + '화 녹화 중 · ' : '') + '💾 저장됨: ' + name);
+}
+$('recbtn').onclick = toggleRec;
+$('auto').onclick = toggleAuto;
+$('fs').onclick = bigStage;
+
+$('export').onclick = exportPage;
+$('mklinks').onclick = makeLinks;
+$('verify').onclick = verify;
+$('load').onclick = () => applyList(0);
+$('prev').onclick = () => play(cur - 1);
+$('next').onclick = () => play(cur + 1);
+$('go').onclick = () => { const n = parseInt($('jump').value, 10); if (n >= 1 && n <= ids.length) play(n - 1); };
+$('ytopen').onclick = () => { if (cur >= 0) window.open('https://www.youtube.com/watch?v=' + ids[cur], '_blank'); };
+$('clear').onclick = () => { $('input').value = ''; ids = []; cur = -1; renderList(); $('now').textContent = '영상 목록을 입력하세요'; save(); };
+
+// 저장된 목록/위치 복원
+let restoredFromSave = false;
+try {
+  const saved = JSON.parse(localStorage.getItem(KEY) || 'null');
+  if (saved && saved.text) {
+    restoredFromSave = true;
+    $('input').value = saved.text;
+    $('rev').checked = !!saved.rev;
+    ids = parseList(saved.text);
+    cur = Math.min(Math.max(saved.cur || 0, 0), ids.length - 1);
+    if (ids.length) { $('box').open = false; $('now').textContent = (cur + 1) + '화 / 총 ' + ids.length + '화 (재생 버튼을 누르세요)'; renderList(); }
+  }
+} catch (e) {}
+
+// 처음 열면 112강 목록을 자동으로 넣고, 제목으로 번호를 바로잡은 뒤 1화로 맞춤
+// 강의 목록 파일 올리기 (.txt 또는 예전 플레이어 .html 둘 다 가능) — 이 기기에만 저장됨
+$('upbtn').onclick = () => $('upfile').click();
+$('upfile').onchange = async e => {
+  const f = e.target.files && e.target.files[0];
+  if (!f) return;
+  let t = await f.text();
+  if (/<html|<textarea/i.test(t)) {
+    const m = t.match(/const DEFAULT_LIST = (".*?");/);
+    if (m) { try { t = JSON.parse(m[1]); } catch (x) {} }
+    else { const ta = t.match(/<textarea[^>]*>([\s\S]*?)<\/textarea>/i); if (ta) t = ta[1]; }
+  }
+  const n = parseList(t).length;
+  if (!n) { $('upst').textContent = '파일에서 유튜브 링크를 찾지 못했어요.'; e.target.value = ''; return; }
+  if (rec) finishRec('_중간끊김');
+  $('input').value = t.trim();
+  applyList(0); makeLinks();
+  $('upst').textContent = f.name + ' → ' + n + '개 불러옴 (이 기기에 저장됨)';
+  e.target.value = '';
+};
+if (!restoredFromSave) {
+  if (!$('input').value.trim() && DEFAULT_LIST) $('input').value = DEFAULT_LIST;
+  if ($('input').value.trim()) { applyList(0); makeLinks(); }
+  else $('now').textContent = '📂 강의 목록 파일을 올려 주세요';
+}
+</script>
+
+
+</body></html>
