@@ -75,6 +75,15 @@
     <span id="upst" style="font-size:13px;color:var(--sub)"></span>
   </div>
 
+  <div class="row" style="align-items:center">
+    <button id="scan" class="main">이 폰에 저장된 링크 모두 찾기</button>
+    <span id="scanst" style="font-size:13px;color:var(--sub)"></span>
+  </div>
+  <div id="scanbox" style="display:none;margin:6px 0 10px">
+    <div class="row"><button id="scancopy" class="main">전부 복사</button><button id="scansave">txt 파일로 받기</button><button id="scanuse">이 목록으로 재생</button></div>
+    <textarea id="scanout" readonly style="min-height:220px"></textarea>
+  </div>
+
   <details id="box">
     <summary>영상 목록 (한 줄에 링크 하나, 위에서부터 1화, 2화…)</summary>
     <textarea id="input" placeholder="https://www.youtube.com/live/xxxxxxxxxxx
@@ -496,6 +505,53 @@ $('next').onclick = () => play(cur + 1);
 $('go').onclick = () => { const n = parseInt($('jump').value, 10); if (n >= 1 && n <= ids.length) play(n - 1); };
 $('ytopen').onclick = () => { if (cur >= 0) window.open('https://www.youtube.com/watch?v=' + ids[cur], '_blank'); };
 $('clear').onclick = () => { $('input').value = ''; ids = []; cur = -1; renderList(); $('now').textContent = '영상 목록을 입력하세요'; save(); };
+
+// ===== 이 폰(이 브라우저)에 저장된 유튜브 링크 찾기 =====
+// 같은 주소(yujongho0714.github.io)의 앱들이 저장해 둔 것을 전부 훑어서 유튜브 영상 번호를 모아요
+function scanPhone() {
+  const found = new Map();   // id -> {n, src}
+  const addText = (txt, src) => {
+    let lastN = null;
+    String(txt).split(/\r?\n|\\n/).forEach(line => {
+      const re = /(?:youtu\.be\/|youtube\.com\/(?:watch\?(?:[^\s"']*&)?v=|live\/|shorts\/|embed\/))([A-Za-z0-9_-]{11})/g;
+      const nm = line.match(/(\d+)\s*강/);
+      let m, any = false;
+      while ((m = re.exec(line))) { any = true; const id = m[1]; if (!found.has(id)) found.set(id, { n: nm ? +nm[1] : lastN, src }); }
+      if (any) lastN = null; else if (nm) lastN = +nm[1];
+    });
+  };
+  try { addText($('input').value, '지금 목록'); } catch (e) {}
+  try {
+    for (let i = 0; i < localStorage.length; i++) {
+      const k = localStorage.key(i); let v = localStorage.getItem(k) || '';
+      if (!/youtu/.test(v)) continue;
+      try { const o = JSON.parse(v); if (o && typeof o === 'object') v = JSON.stringify(o, null, 1).replace(/\\n/g, '\n'); } catch (e) {}
+      addText(v, k);
+    }
+  } catch (e) {}
+  let L = [...found.entries()].map(([id, o]) => ({ id, n: o.n, src: o.src }));
+  if (L.length && L.every(x => x.n != null)) L.sort((a, b) => a.n - b.n);
+  return L;
+}
+let SCAN = [];
+$('scan').onclick = () => {
+  SCAN = scanPhone();
+  if (!SCAN.length) { $('scanst').textContent = '이 폰에서 저장된 유튜브 링크를 못 찾았어요. 목록을 올렸던 그 폰 · 그 브라우저(크롬)에서 열어 주세요.'; $('scanbox').style.display = 'none'; return; }
+  $('scanout').value = SCAN.map((x, i) => (x.n != null ? x.n + '강 ' : (i + 1) + '. ') + 'https://www.youtube.com/live/' + x.id).join('\n');
+  $('scanst').textContent = '링크 ' + SCAN.length + '개를 찾았어요';
+  $('scanbox').style.display = '';
+};
+$('scancopy').onclick = async () => {
+  const t = $('scanout').value; let ok = false;
+  try { await navigator.clipboard.writeText(t); ok = true; } catch (e) { try { $('scanout').select(); ok = document.execCommand('copy'); } catch (_) {} }
+  $('scanst').textContent = ok ? SCAN.length + '개를 복사했어요. 카톡 · 메모에 붙여 넣으면 돼요' : '복사가 안 돼요. 칸을 길게 눌러 전체 선택 후 복사해 주세요';
+};
+$('scansave').onclick = () => {
+  const d = new Date(), ymd = d.getFullYear() + String(d.getMonth() + 1).padStart(2, '0') + String(d.getDate()).padStart(2, '0');
+  const a = document.createElement('a'); a.href = URL.createObjectURL(new Blob([$('scanout').value + '\n'], { type: 'text/plain' }));
+  a.download = 'youtube_links_' + ymd + '.txt'; document.body.appendChild(a); a.click(); setTimeout(() => { URL.revokeObjectURL(a.href); a.remove(); }, 1000);
+};
+$('scanuse').onclick = () => { $('input').value = $('scanout').value; $('box').open = true; $('load').click(); };
 
 // 저장된 목록/위치 복원
 let restoredFromSave = false;
